@@ -23,10 +23,23 @@ struct {
   struct run *freelist;
 } kmem;
 
+// Per-physical-page reference count, used so a page shared between a
+// COW fork's parent and child (or further descendants) is only
+// actually freed once nobody has it mapped any more. Indexed by
+// physical page number, i.e. (pa - KERNBASE) / PGSIZE.
+#define PA2PAGENO(pa) (((uint64)(pa) - KERNBASE) / PGSIZE)
+#define NPAGES        PA2PAGENO(PHYSTOP)
+
+struct {
+  struct spinlock lock;
+  uint8 count[NPAGES];
+} refcount;
+
 void
 kinit()
 {
   initlock(&kmem.lock, "kmem");
+  initlock(&refcount.lock, "refcount");
   freerange(end, (void *)PHYSTOP);
 }
 
@@ -35,8 +48,24 @@ freerange(void *pa_start, void *pa_end)
 {
   char *p;
   p = (char *)PGROUNDUP((uint64)pa_start);
-  for (; p + PGSIZE <= (char *)pa_end; p += PGSIZE)
+  for (; p + PGSIZE <= (char *)pa_end; p += PGSIZE) {
+    // kfree decrements the refcount and only frees at zero, so give
+    // each page a starting count of 1, as if kalloc had handed it
+    // out once, matching the invariant kalloc/kfree maintain below.
+    refcount.count[PA2PAGENO(p)] = 1;
     kfree(p);
+  }
+}
+
+// Record that pa is now also mapped by one more page table (used by
+// uvmcopy when it shares a page between parent and child instead of
+// copying it). Caller must already hold a reference to pa.
+void
+krefinc(void *pa)
+{
+  acquire(&refcount.lock);
+  refcount.count[PA2PAGENO(pa)]++;
+  release(&refcount.lock);
 }
 
 // Free the page of physical memory pointed at by pa,
@@ -47,9 +76,19 @@ void
 kfree(void *pa)
 {
   struct run *r;
+  int count;
 
   if (((uint64)pa % PGSIZE) != 0 || (char *)pa < end || (uint64)pa >= PHYSTOP)
     panic("kfree");
+
+  acquire(&refcount.lock);
+  count = --refcount.count[PA2PAGENO(pa)];
+  release(&refcount.lock);
+
+  if (count < 0)
+    panic("kfree: refcount");
+  if (count > 0)
+    return; // other page tables still map this page
 
   // Fill with junk to catch dangling refs.
   memset(pa, 1, PGSIZE);
@@ -76,7 +115,11 @@ kalloc(void)
     kmem.freelist = r->next;
   release(&kmem.lock);
 
-  if (r)
+  if (r) {
     memset((char *)r, 5, PGSIZE); // fill with junk
+    acquire(&refcount.lock);
+    refcount.count[PA2PAGENO(r)] = 1;
+    release(&refcount.lock);
+  }
   return (void *)r;
 }

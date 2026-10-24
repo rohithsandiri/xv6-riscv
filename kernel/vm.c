@@ -295,13 +295,17 @@ uvmfree(pagetable_t pagetable, uint64 sz)
 // physical memory.
 // returns 0 on success, -1 on failure.
 // frees any allocated pages on failure.
+// Instead of copying each page, map it into the child read-only and
+// shared with the parent (clearing PTE_W, setting PTE_COW on both
+// sides) and bump its refcount. A later write by either process
+// faults in usertrap, which gives the faulting process its own
+// private copy -- see cowfault below.
 int
 uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
 {
   pte_t *pte;
   uint64 pa, i;
   uint flags;
-  char *mem;
 
   for (i = 0; i < sz; i += PGSIZE) {
     if ((pte = walk(old, i, 0)) == 0)
@@ -310,19 +314,55 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
       continue; // physical page hasn't been allocated
     pa = PTE2PA(*pte);
     flags = PTE_FLAGS(*pte);
-    if ((mem = kalloc()) == 0)
-      goto err;
-    memmove(mem, (char *)pa, PGSIZE);
-    if (mappages(new, i, PGSIZE, (uint64)mem, flags) != 0) {
-      kfree(mem);
-      goto err;
+    if (flags & PTE_W) {
+      flags = (flags & ~PTE_W) | PTE_COW;
+      *pte = PA2PTE(pa) | flags;
     }
+    if (mappages(new, i, PGSIZE, pa, flags) != 0)
+      goto err;
+    krefinc((void *)pa);
   }
   return 0;
 
 err:
   uvmunmap(new, 0, i / PGSIZE, 1);
   return -1;
+}
+
+// Handle a write fault to a COW page: give the faulting process its
+// own private, writable copy of the physical page, dropping the
+// shared one's refcount. Returns 0 on success, -1 if va isn't a COW
+// page or we're out of memory (caller should kill the process).
+int
+cowfault(pagetable_t pagetable, uint64 va)
+{
+  pte_t *pte;
+  uint64 pa;
+  uint flags;
+  char *mem;
+
+  if (va >= MAXVA)
+    return -1;
+  va = PGROUNDDOWN(va);
+  if ((pte = walk(pagetable, va, 0)) == 0)
+    return -1;
+  if ((*pte & PTE_V) == 0 || (*pte & PTE_COW) == 0)
+    return -1;
+
+  pa = PTE2PA(*pte);
+  flags = (PTE_FLAGS(*pte) & ~PTE_COW) | PTE_W;
+
+  if ((mem = kalloc()) == 0)
+    return -1;
+  memmove(mem, (char *)pa, PGSIZE);
+
+  // Replace the mapping before dropping our reference to the old
+  // page, so a concurrent kfree of the old page (from the last other
+  // holder) can't race with us still reading from it above -- by the
+  // time we call kfree, this PTE no longer points at pa.
+  *pte = PA2PTE((uint64)mem) | flags;
+  kfree((void *)pa);
+  return 0;
 }
 
 // mark a PTE invalid for user access.
@@ -360,9 +400,17 @@ copyout(pagetable_t pagetable, uint64 psz, uint64 dstva, char *src, uint64 len)
     }
 
     pte = walk(pagetable, va0, 0);
+    // A copy-on-write page looks read-only (PTE_W is clear) but
+    // isn't really: break the sharing here, the same as a user
+    // store instruction would via the page-fault path in trap.c.
+    if (*pte & PTE_COW) {
+      if (cowfault(pagetable, va0) != 0)
+        return -1;
+    }
     // forbid copyout over read-only user text pages.
     if ((*pte & PTE_W) == 0)
       return -1;
+    pa0 = PTE2PA(*pte);
 
     n = PGSIZE - (dstva - va0);
     if (n > len)
