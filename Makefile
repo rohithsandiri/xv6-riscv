@@ -126,6 +126,10 @@ $U/_locktest: $U/locktest.o $U/uthread_lock.o $(ULIB)
 	$(LD) $(LDFLAGS) -T $U/user.ld -o $U/_locktest $U/locktest.o $U/uthread_lock.o $(ULIB)
 	$(OBJDUMP) -S $U/_locktest > $U/locktest.asm
 
+$U/_uthreadtest: $U/uthreadtest.o $U/uthread.o $(ULIB)
+	$(LD) $(LDFLAGS) -T $U/user.ld -o $U/_uthreadtest $U/uthreadtest.o $U/uthread.o $(ULIB)
+	$(OBJDUMP) -S $U/_uthreadtest > $U/uthreadtest.asm
+
 mkfs/mkfs: mkfs/mkfs.c $K/fs.h $K/param.h
 	gcc -Wno-unknown-attributes -I. -o mkfs/mkfs mkfs/mkfs.c
 
@@ -163,6 +167,7 @@ UPROGS=\
 	$U/_zerotest\
 	$U/_clonetest\
 	$U/_locktest\
+	$U/_uthreadtest\
 
 fs.img: mkfs/mkfs README $(UPROGS)
 	mkfs/mkfs fs.img README $(UPROGS)
