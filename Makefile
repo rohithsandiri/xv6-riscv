@@ -5,6 +5,7 @@ OBJS = \
   $K/entry.o \
   $K/start.o \
   $K/console.o \
+  $K/zero.o \
   $K/printk.o \
   $K/uart.o \
   $K/kalloc.o \
@@ -155,6 +156,7 @@ UPROGS=\
 	$U/_symlinktest\
 	$U/_bigfiletest\
 	$U/_cowtest\
+	$U/_zerotest\
 
 fs.img: mkfs/mkfs README $(UPROGS)
 	mkfs/mkfs fs.img README $(UPROGS)
