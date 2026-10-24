@@ -146,6 +146,9 @@ found:
   p->context.ra = (uint64)forkret;
   p->context.sp = p->kstack + PGSIZE;
 
+  p->priority = DEFAULT_PRIORITY;
+  p->last_run = 0;
+
   return p;
 }
 
@@ -429,6 +432,7 @@ void
 scheduler(void)
 {
   struct proc *p;
+  struct proc *best;
   struct cpu *c = mycpu();
 
   c->proc = 0;
@@ -441,28 +445,46 @@ scheduler(void)
     intr_on();
     intr_off();
 
-    int found = 0;
+    // Scan the whole table and pick the RUNNABLE process with the
+    // highest priority, breaking ties in favor of whichever
+    // candidate ran longest ago (last_run), so that processes of
+    // equal priority round-robin instead of one starving the rest.
+    // We walk procs in increasing index order and only ever hold at
+    // most two p->locks at a time (the current best's, and the one
+    // we're examining), always acquiring in increasing index order,
+    // so this can't deadlock against itself or against the
+    // identical scan on another CPU.
+    best = 0;
     for (p = proc; p < &proc[NPROC]; p++) {
       acquire(&p->lock);
-      if (p->state == RUNNABLE) {
-        // Switch to chosen process.  It is the process's job
-        // to release its lock and then reacquire it
-        // before jumping back to us.
-        p->state = RUNNING;
-        c->proc = p;
-        swtch(&c->context, &p->context);
-
-        // Don't re-enable interrupts on release.
-        mycpu()->intena = 0;
-
-        // Process is done running for now.
-        // It should have changed its p->state before coming back.
-        c->proc = 0;
-        found = 1;
+      if (p->state == RUNNABLE &&
+          (best == 0 || p->priority > best->priority ||
+           (p->priority == best->priority && p->last_run < best->last_run))) {
+        if (best)
+          release(&best->lock);
+        best = p;
+        continue; // keep best->lock held
       }
       release(&p->lock);
     }
-    if (found == 0) {
+
+    if (best) {
+      // Switch to chosen process.  It is the process's job
+      // to release its lock and then reacquire it
+      // before jumping back to us.
+      best->last_run = ticks;
+      best->state = RUNNING;
+      c->proc = best;
+      swtch(&c->context, &best->context);
+
+      // Don't re-enable interrupts on release.
+      mycpu()->intena = 0;
+
+      // Process is done running for now.
+      // It should have changed its p->state before coming back.
+      c->proc = 0;
+      release(&best->lock);
+    } else {
       // nothing to run; stop running on this core until an interrupt.
       asm volatile("wfi");
     }
@@ -613,6 +635,31 @@ kkill(int pid)
         // Wake process from sleep().
         p->state = RUNNABLE;
       }
+      release(&p->lock);
+      return 0;
+    }
+    release(&p->lock);
+  }
+  return -1;
+}
+
+// Set the scheduling priority of the process with the given pid.
+// Clamps into [MIN_PRIORITY, MAX_PRIORITY]. Returns 0 on success,
+// -1 if no such pid.
+int
+setpriority(int pid, int priority)
+{
+  struct proc *p;
+
+  if (priority < MIN_PRIORITY)
+    priority = MIN_PRIORITY;
+  if (priority > MAX_PRIORITY)
+    priority = MAX_PRIORITY;
+
+  for (p = proc; p < &proc[NPROC]; p++) {
+    acquire(&p->lock);
+    if (p->pid == pid) {
+      p->priority = priority;
       release(&p->lock);
       return 0;
     }

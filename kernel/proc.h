@@ -101,4 +101,10 @@ struct proc {
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
+  int priority;                // Scheduling priority; higher runs first
+  uint64 last_run;             // ticks value when last scheduled; breaks priority ties round-robin
 };
+
+#define DEFAULT_PRIORITY 10
+#define MIN_PRIORITY 1
+#define MAX_PRIORITY 20
