@@ -329,6 +329,40 @@ err:
   return -1;
 }
 
+// Like uvmcopy, but for clone(): map the new page table's entries at
+// the SAME physical pages as the old one, with the same flags
+// (including PTE_W, and PTE_COW if the page was already
+// copy-on-write from an earlier fork) -- real shared memory between
+// two threads, not copy-on-write isolation between two processes.
+// Each page's refcount is bumped via krefinc, so kalloc.c's existing
+// "every live mapping holds one reference" accounting is what keeps
+// a shared page alive until the last page table pointing at it -- in
+// this case the last thread's -- is torn down.
+int
+uvmshare(pagetable_t old, pagetable_t new, uint64 sz)
+{
+  pte_t *pte;
+  uint64 pa, i;
+  uint flags;
+
+  for (i = 0; i < sz; i += PGSIZE) {
+    if ((pte = walk(old, i, 0)) == 0)
+      continue;
+    if ((*pte & PTE_V) == 0)
+      continue;
+    pa = PTE2PA(*pte);
+    flags = PTE_FLAGS(*pte);
+    if (mappages(new, i, PGSIZE, pa, flags) != 0)
+      goto err;
+    krefinc((void *)pa);
+  }
+  return 0;
+
+err:
+  uvmunmap(new, 0, i / PGSIZE, 1);
+  return -1;
+}
+
 // Handle a write fault to a COW page: give the faulting process its
 // own private, writable copy of the physical page, dropping the
 // shared one's refcount. Returns 0 on success, -1 if va isn't a COW

@@ -157,6 +157,7 @@ UPROGS=\
 	$U/_bigfiletest\
 	$U/_cowtest\
 	$U/_zerotest\
+	$U/_clonetest\
 
 fs.img: mkfs/mkfs README $(UPROGS)
 	mkfs/mkfs fs.img README $(UPROGS)

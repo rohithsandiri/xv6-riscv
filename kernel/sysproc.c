@@ -37,6 +37,22 @@ sys_wait(void)
 }
 
 uint64
+sys_clone(void)
+{
+  uint64 stack;
+  argaddr(0, &stack);
+  return kclone((void *)stack);
+}
+
+uint64
+sys_join(void)
+{
+  int pid;
+  argint(0, &pid);
+  return kjoin(pid);
+}
+
+uint64
 sys_sbrk(void)
 {
   uint64 addr;

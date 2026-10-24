@@ -45,3 +45,5 @@ entry("uptime");
 entry("sync");
 entry("nice");
 entry("symlink");
+entry("clone");
+entry("join");

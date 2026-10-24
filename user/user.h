@@ -27,6 +27,8 @@ int uptime(void);
 int sync(void);
 int nice(int, int);
 int symlink(const char *, const char *);
+int clone(void *);
+int join(int);
 
 // ulib.c
 int stat(const char *, struct stat *);

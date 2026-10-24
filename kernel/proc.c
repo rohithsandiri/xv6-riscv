@@ -307,6 +307,104 @@ kfork(void)
   return pid;
 }
 
+// Like fork, but the new thread gets its own page table (so it has
+// its own TRAPFRAME/TRAMPOLINE mapping and kernel stack -- the
+// trampoline's trapframe address is a single hardcoded VA shared by
+// every page table, so two threads can never literally share one
+// pagetable_t) with the user address range [0, p->sz) mapped onto
+// the SAME physical pages as the caller's, via uvmshare instead of
+// uvmcopy. The new thread starts executing at the same point as the
+// clone() call, like fork, but on the caller-supplied stack, and
+// clone returns 0 in the new thread the way fork returns 0 in the
+// child -- it's up to the caller (the user-space thread library) to
+// use that to dispatch into the thread's start function.
+int
+kclone(void *stack)
+{
+  int i, pid;
+  struct proc *np;
+  struct proc *p = myproc();
+
+  if ((np = allocproc()) == 0) {
+    return -1;
+  }
+
+  if (uvmshare(p->pagetable, np->pagetable, p->sz) < 0) {
+    freeproc(np);
+    release(&np->lock);
+    return -1;
+  }
+  np->sz = p->sz;
+
+  *(np->trapframe) = *(p->trapframe);
+  np->trapframe->a0 = 0;      // clone() returns 0 in the new thread
+  np->trapframe->sp = (uint64)stack;
+
+  for (i = 0; i < NOFILE; i++)
+    if (p->ofile[i])
+      np->ofile[i] = filedup(p->ofile[i]);
+  np->cwd = idup(p->cwd);
+
+  safestrcpy(np->name, p->name, sizeof(p->name));
+
+  pid = np->pid;
+
+  release(&np->lock);
+
+  acquire(&wait_lock);
+  np->parent = p;
+  release(&wait_lock);
+
+  acquire(&np->lock);
+  np->state = RUNNABLE;
+  release(&np->lock);
+
+  return pid;
+}
+
+// Like wait(), but joins a specific thread by pid instead of any
+// child. Because each thread already owns its own private page
+// table (see kclone), reaping it via freeproc is exactly as safe as
+// reaping an ordinary child process: there is no shared pagetable_t
+// to accidentally free out from under a sibling thread, since
+// nothing but the already-refcounted physical pages is shared.
+int
+kjoin(int pid)
+{
+  struct proc *pp;
+  struct proc *p = myproc();
+
+  acquire(&wait_lock);
+
+  for (;;) {
+    int found = 0;
+    for (pp = proc; pp < &proc[NPROC]; pp++) {
+      if (pp->parent == p && pp->pid == pid) {
+        acquire(&pp->lock);
+        found = 1;
+        if (pp->state == ZOMBIE) {
+          pp->parent = 0;
+          freeproc(pp);
+          release(&pp->lock);
+          release(&wait_lock);
+          return pid;
+        }
+        release(&pp->lock);
+      }
+    }
+
+    if (!found || killed(p)) {
+      release(&wait_lock);
+      return -1;
+    }
+
+    sleep_prepare(p);
+    release(&wait_lock);
+    sleep();
+    acquire(&wait_lock);
+  }
+}
+
 // Pass p's abandoned children to init.
 // Caller must hold wait_lock.
 void
