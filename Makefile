@@ -122,6 +122,10 @@ $U/_forktest: $U/forktest.o $(ULIB)
 	$(LD) $(LDFLAGS) -N -e main -Ttext 0 -o $U/_forktest $U/forktest.o $U/ulib.o $U/usys.o
 	$(OBJDUMP) -S $U/_forktest > $U/forktest.asm
 
+$U/_locktest: $U/locktest.o $U/uthread_lock.o $(ULIB)
+	$(LD) $(LDFLAGS) -T $U/user.ld -o $U/_locktest $U/locktest.o $U/uthread_lock.o $(ULIB)
+	$(OBJDUMP) -S $U/_locktest > $U/locktest.asm
+
 mkfs/mkfs: mkfs/mkfs.c $K/fs.h $K/param.h
 	gcc -Wno-unknown-attributes -I. -o mkfs/mkfs mkfs/mkfs.c
 
@@ -158,6 +162,7 @@ UPROGS=\
 	$U/_cowtest\
 	$U/_zerotest\
 	$U/_clonetest\
+	$U/_locktest\
 
 fs.img: mkfs/mkfs README $(UPROGS)
 	mkfs/mkfs fs.img README $(UPROGS)
