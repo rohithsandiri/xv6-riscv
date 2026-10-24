@@ -325,6 +325,10 @@ fail:
   return 0;
 }
 
+// Maximum symlink hops open() will follow before giving up: catches
+// cycles (a -> b -> a) without a separate visited-set.
+#define MAXSYMLINKS 10
+
 uint64
 sys_open(void)
 {
@@ -332,7 +336,7 @@ sys_open(void)
   int fd, omode;
   struct file *f;
   struct inode *ip;
-  int n;
+  int n, i;
 
   argint(1, &omode);
   if ((n = argstr(0, path, MAXPATH)) < 0)
@@ -352,6 +356,31 @@ sys_open(void)
       return -1;
     }
     ilock(ip);
+
+    // Follow a chain of symlinks unless the caller asked not to.
+    // Each iteration reads the target path stored as the symlink's
+    // file content, then re-resolves it with namei. A fixed hop
+    // limit turns a symlink cycle into an error instead of a hang.
+    for (i = 0; ip->type == T_SYMLINK && !(omode & O_NOFOLLOW); i++) {
+      if (i >= MAXSYMLINKS) {
+        iunlockput(ip);
+        end_op();
+        return -1;
+      }
+      if ((n = readi(ip, 0, (uint64)path, 0, MAXPATH - 1)) <= 0) {
+        iunlockput(ip);
+        end_op();
+        return -1;
+      }
+      path[n] = '\0';
+      iunlockput(ip);
+      if ((ip = namei(path)) == 0) {
+        end_op();
+        return -1;
+      }
+      ilock(ip);
+    }
+
     if (ip->type == T_DIR && omode != O_RDONLY) {
       iunlockput(ip);
       end_op();
@@ -392,6 +421,36 @@ sys_open(void)
   end_op();
 
   return fd;
+}
+
+uint64
+sys_symlink(void)
+{
+  char target[MAXPATH], path[MAXPATH];
+  struct inode *ip;
+
+  if (argstr(0, target, MAXPATH) < 0 || argstr(1, path, MAXPATH) < 0)
+    return -1;
+
+  begin_op();
+
+  // Store the symlink's target as the file's own content, the same
+  // way a regular file stores its data; sys_open's resolution loop
+  // reads it back with readi.
+  if ((ip = create(path, T_SYMLINK, 0, 0)) == 0) {
+    end_op();
+    return -1;
+  }
+
+  if (writei(ip, 0, (uint64)target, 0, strlen(target)) != strlen(target)) {
+    iunlockput(ip);
+    end_op();
+    return -1;
+  }
+
+  iunlockput(ip);
+  end_op();
+  return 0;
 }
 
 uint64
